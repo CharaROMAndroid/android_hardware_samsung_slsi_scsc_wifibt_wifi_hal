@@ -239,16 +239,30 @@ protected:
             memcpy(iface_stat2, data, iface_data_len1);
             data += iface_data_len1;
 
-            for (i = 0; i < iface_stat2->num_peers; i++) {
-                memcpy(&iface_stat2->peer_info[i].type, data, sizeof(wifi_peer_type));
-                data += sizeof(wifi_peer_type);
-                memcpy(iface_stat2->peer_info[i].peer_mac_address, data, (sizeof(u8) * 6));
-                data += (sizeof(u8) * 6) + 2; //for allignment skip 2 bytes
-                memcpy(&iface_stat2->peer_info[i].capabilities, data, sizeof(u32));
-                data += sizeof(u32);
-                memcpy(&iface_stat2->peer_info[i].num_rate, data, sizeof(u32));
-                data += sizeof(u32);
+            /* One peer as the driver sends it (struct slsi_lls_peer_info, 28 bytes): type @0,
+             * mac @4, capabilities @12, bssload @16 (sta_count, chan_util, 4 bytes pad),
+             * num_rate @24, and no per-rate entries after it. Reading only type, mac,
+             * capabilities and num_rate (20 bytes) fell 8 bytes behind per peer, so with a
+             * second peer (a TDLS link, which a big local file transfer sets up) num_rate
+             * came from that peer's MAC address: the framework then read tens of thousands
+             * of rate entries past this buffer, this HAL crashed and Wi-Fi went down. The
+             * radio stats after the peers were misread by the same 8 bytes per peer. */
+            const size_t drv_peer_len = 28;
+            u32 num_peers = iface_stat2->num_peers;
+            if (iface_stat2->num_peers > 16)
+                iface_stat2->num_peers = 16;
+            for (i = 0; i < (int)iface_stat2->num_peers; i++) {
+                u8 *p = data + i * drv_peer_len;
+                wifi_peer_info *peer = &iface_stat2->peer_info[i];
+                memset(peer, 0, sizeof(*peer));
+                memcpy(&peer->type, p, sizeof(peer->type));
+                memcpy(peer->peer_mac_address, p + 4, 6);
+                memcpy(&peer->capabilities, p + 12, sizeof(u32));
+                memcpy(&peer->bssload.sta_count, p + 16, sizeof(u16));
+                memcpy(&peer->bssload.chan_util, p + 18, sizeof(u16));
+                peer->num_rate = 0;
             }
+            data += num_peers * drv_peer_len;
         } else {
             /* for 64 bit kernel ad 32 bit user space, there is 4 byte extra at the begining and another 4 byte pad after 80 bytes
              * so remove first 4 and 81-84 bytes from NL buffer.*/
